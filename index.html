@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="お題一致">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>お題一致ゲーム</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html,body{height:100%}
+  body{background:linear-gradient(160deg,#0f172a,#312e81);color:#fff;min-height:100dvh;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    -webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;overscroll-behavior:none;
+    font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif}
+  textarea,input{-webkit-user-select:text;user-select:text;font-size:18px}
+  .btn{display:block;width:100%;border-radius:1rem;padding:1rem;font-size:1.125rem;font-weight:700;transition:transform .1s}
+  .btn:active{transform:scale(.96)}
+  .btn-main{background:#6366f1}.btn-sub{background:rgba(255,255,255,.12)}.btn-ok{background:#10b981}
+  .card{background:rgba(255,255,255,.08);border-radius:1.25rem;padding:1.25rem}
+</style>
+</head>
+<body>
+<div id="app" class="max-w-md mx-auto p-4 pb-10"></div>
+<div id="conn" class="fixed bottom-2 right-3 text-xs opacity-70"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+// ===== Firebase 設定（コンソールの値に置き換え）=====
+const firebaseConfig = {
+  apiKey: "AIzaSyDToCetB6dnNG8o8XWth6QE_pXr-VysLdk",
+  authDomain: "misogi3101.firebaseapp.com",
+  databaseURL: "https://misogi3101-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "misogi3101",
+  storageBucket: "misogi3101.firebasestorage.app",
+  messagingSenderId: "249566496541",
+  appId: "1:249566496541:web:758e530793992e89e783f4",
+  measurementId: "G-NMH836HZWC"
+};
+const DEFAULT_TOPICS = ["好きな食べ物","夏といえば","無人島に1つ持っていくなら","朝食の定番","動物といえば","カレーに入れたい具","旅行したい国","子どもの頃の遊び"];
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+let me = null, users = {}, topics = {}, room = {}, lastKey = '', advancing = false;
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const norm = s => (s||'').normalize('NFKC').trim().toLowerCase().replace(/\s+/g,'')
+  .replace(/[\u30a1-\u30f6]/g, c => String.fromCharCode(c.charCodeAt(0)-0x60)); // カナ→かな
+const uname = id => users[id]?.name || room.players?.[id]?.name || '(不明)';
+const pick = a => a[Math.floor(Math.random()*a.length)];
+
+// ===== マスタ初期化・購読 =====
+db.ref('topics').transaction(c => c || Object.fromEntries(DEFAULT_TOPICS.map((t,i)=>['t'+i,t])));
+db.ref('topics').on('value', s => { topics = s.val() || {}; render(); });
+db.ref('users').on('value', s => {
+  users = s.val() || {};
+  const saved = localStorage.getItem('meId');
+  if (!me && saved && users[saved]) join(saved);
+  else render();
+});
+db.ref('room').on('value', s => { room = s.val() || {}; checkAdvance(); render(); });
+db.ref('.info/connected').on('value', s => {
+  $('#conn').textContent = s.val() ? '● online' : '○ offline';
+  if (s.val() && me) presence();
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden && me) presence(); });
+
+// ===== 参加 / 退出 =====
+function presence() {
+  const r = db.ref('room/players/' + me.id);
+  r.onDisconnect().remove();
+  r.set({ name: me.name, t: firebase.database.ServerValue.TIMESTAMP });
+}
+function join(id) {
+  me = { id, name: users[id].name };
+  localStorage.setItem('meId', id);
+  presence(); render();
+}
+function leave() {
+  const r = db.ref('room/players/' + me.id);
+  r.onDisconnect().cancel(); r.remove();
+  localStorage.removeItem('meId'); me = null; lastKey=''; render();
+}
+
+// ===== ゲーム進行 =====
+function start() {
+  const tl = Object.values(topics);
+  if (!tl.length) return alert('お題がありません');
+  db.ref('room').transaction(c => {
+    if (!c) return c;
+    if (c.phase === 'answering' || c.phase === 'result') return; // 二重開始防止
+    const ids = Object.keys(c.players || {});
+    if (ids.length < 2) return;
+    c.phase = 'answering'; c.topic = pick(tl); c.parentId = pick(ids);
+    c.members = ids; c.answers = null; c.round = (c.round || 0) + 1;
+    return c;
+  });
+}
+function send() {
+  const v = $('#ans').value.trim();
+  if (!v) return;
+  db.ref('room/answers/' + me.id).set(v);
+}
+function checkAdvance() {
+  if (!me || room.phase !== 'answering' || advancing) return;
+  const pl = room.players || {}, an = room.answers || {};
+  const req = (room.members || []).filter(id => pl[id]);
+  if (req.length && req.every(id => an[id] !== undefined)) reveal();
+}
+function reveal() {
+  advancing = true;
+  db.ref('room').transaction(c => {
+    if (!c) return c;
+    if (c.phase !== 'answering') return;
+    c.phase = 'result'; return c;
+  }).finally(() => advancing = false);
+}
+function next() {
+  db.ref('room').transaction(c => {
+    if (!c) return c;
+    if (c.phase !== 'result') return;
+    c.phase = 'lobby'; c.topic = null; c.parentId = null; c.members = null; c.answers = null;
+    return c;
+  });
+}
+function addUser() {
+  const n = (prompt('ニックネームを入力') || '').trim().slice(0, 20);
+  if (!n) return;
+  if (Object.values(users).some(u => u.name === n)) return alert('同じ名前が既にあります');
+  const r = db.ref('users').push({ name: n });
+  users[r.key] = { name: n }; join(r.key);
+}
+function addTopic() {
+  const t = (prompt('お題を入力') || '').trim().slice(0, 60);
+  if (t) db.ref('topics').push(t);
+}
+
+// ===== 描画 =====
+const actions = { pickUser: id => join(id), addUser, addTopic, leave, start, send, reveal, next };
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-a]');
+  if (el) actions[el.dataset.a]?.(el.dataset.v);
+});
+
+function playersChips() {
+  const pl = room.players || {};
+  return Object.entries(pl).map(([id,p]) =>
+    `<span class="inline-block bg-white/15 rounded-full px-3 py-1 m-1">${esc(p.name)}${id===me?.id?'（あなた）':''}</span>`).join('') || '<span class="opacity-60">なし</span>';
+}
+const header = () => `<div class="flex justify-between items-center mb-4">
+  <div class="text-lg font-bold">🎯 お題一致</div>
+  <button data-a="leave" class="text-sm bg-white/10 rounded-full px-3 py-1">${esc(me.name)} ▸ 退出</button></div>`;
+
+function render() {
+  const app = $('#app');
+  const phase = !me ? 'login' : (room.phase || 'lobby');
+  const key = phase + ':' + (room.round || 0) + (phase==='answering' ? ':'+(room.members||[]).includes(me?.id) : '');
+  if (phase === 'answering') {
+    if (key !== lastKey) { app.innerHTML = answeringShell(); lastKey = key;
+      const mine = room.answers?.[me.id]; if (mine) $('#ans').value = mine; }
+    updateStatus(); return;
+  }
+  lastKey = key;
+  app.innerHTML = ({ login: loginView, lobby: lobbyView, result: resultView })[phase]();
+}
+
+function loginView() {
+  const list = Object.entries(users).map(([id,u]) =>
+    `<button data-a="pickUser" data-v="${esc(id)}" class="btn btn-sub mb-3">${esc(u.name)}</button>`).join('');
+  return `<h1 class="text-2xl font-bold text-center my-6">🎯 お題一致ゲーム</h1>
+    <p class="text-center opacity-80 mb-4">あなたの名前を選んでください</p>
+    ${list || '<p class="text-center opacity-60 mb-4">まだ名前がありません</p>'}
+    <button data-a="addUser" class="btn btn-main mt-2">＋ 新しい名前を追加</button>`;
+}
+
+function lobbyView() {
+  const n = Object.keys(room.players || {}).length;
+  return `${header()}
+    <div class="card mb-4"><div class="text-sm opacity-70 mb-1">参加中（${n}人）</div>${playersChips()}</div>
+    <button data-a="start" class="btn btn-ok mb-3" ${n<2?'disabled style="opacity:.4"':''}>▶ スタート</button>
+    ${n<2?'<p class="text-center text-sm opacity-70 mb-3">2人以上で開始できます</p>':''}
+    <button data-a="addTopic" class="btn btn-sub">＋ お題を追加（現在${Object.keys(topics).length}件）</button>`;
+}
+
+function answeringShell() {
+  const isMember = (room.members || []).includes(me.id);
+  const isParent = room.parentId === me.id;
+  return `${header()}
+    <div class="card mb-4 text-center">
+      <div class="text-sm opacity-70">お題</div>
+      <div class="text-2xl font-bold my-2">${esc(room.topic)}</div>
+      <div class="text-sm">${isParent ? '👑 あなたが<b>親</b>です。素直に答えてね' :
+        `👑 親は <b>${esc(uname(room.parentId))}</b> さん。親の答えを予想しよう`}</div>
+    </div>
+    ${isMember ? `<textarea id="ans" rows="2" maxlength="50" placeholder="回答を入力"
+        class="w-full rounded-2xl p-4 text-slate-900 mb-3"></textarea>
+      <button data-a="send" class="btn btn-main mb-4">送信（再送で上書き）</button>`
+      : '<p class="text-center opacity-80 mb-4">ゲーム進行中です。次のゲームをお待ちください。</p>'}
+    <div class="card mb-3"><div class="text-sm opacity-70 mb-1">回答状況</div><div id="status"></div></div>
+    <button data-a="reveal" class="btn btn-sub">全員を待たずに結果を見る</button>`;
+}
+function updateStatus() {
+  const an = room.answers || {}, pl = room.players || {};
+  $('#status').innerHTML = (room.members || []).map(id => {
+    const done = an[id] !== undefined, gone = !pl[id];
+    return `<div class="flex justify-between py-1"><span>${esc(uname(id))}${id===room.parentId?' 👑':''}${gone?'（離脱）':''}</span>
+      <span>${done ? '✅ 回答済み' : '⌛ 回答中'}</span></div>`;
+  }).join('');
+}
+
+function resultView() {
+  const an = room.answers || {}, pid = room.parentId;
+  const pAns = an[pid], mine = an[me.id], isParent = pid === me.id;
+  const ok = a => a !== undefined && pAns !== undefined && norm(a) === norm(pAns);
+  const box = (label, txt, hl) => `<div class="flex-1 rounded-2xl p-3 text-center ${hl?'bg-emerald-500/40 ring-2 ring-emerald-300':'bg-white/10'}">
+      <div class="text-xs opacity-70">${label}</div><div class="text-xl font-bold mt-1 break-words">${txt===undefined?'（未回答）':esc(txt)}</div></div>`;
+  const others = (room.members || []).filter(id => id !== pid).map(id =>
+    `<div class="flex justify-between py-1"><span>${esc(uname(id))}${id===me.id?'（あなた）':''}</span>
+     <span>${an[id]===undefined?'―':esc(an[id])} ${ok(an[id])?'⭕':''}</span></div>`).join('');
+  const hits = (room.members || []).filter(id => id !== pid && ok(an[id])).length;
+  return `${header()}
+    <div class="card mb-4 text-center"><div class="text-sm opacity-70">お題</div><div class="text-xl font-bold">${esc(room.topic)}</div></div>
+    ${isParent ? '<p class="text-center mb-2">あなたは親でした 👑</p>' :
+      `<div class="text-center text-3xl font-bold mb-3">${ok(mine)?'🎉 一致！':'😢 不一致'}</div>`}
+    <div class="flex gap-3 mb-4">${box('👑 親（'+esc(uname(pid))+'）の回答', pAns, false)}
+      ${isParent ? '' : box('あなたの回答', mine, ok(mine))}</div>
+    <p class="text-center mb-3">一致した人：${hits}人</p>
+    <details class="card mb-4"><summary class="font-bold">みんなの回答を見る</summary><div class="mt-2">${others}</div></details>
+    <button data-a="next" class="btn btn-ok">次のゲームへ</button>`;
+}
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+render();
+</script>
+</body>
+</html>
