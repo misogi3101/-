@@ -47,7 +47,7 @@ const DEFAULT_TOPICS = ["好きな食べ物","夏といえば","無人島に1つ
 
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
-let me = null, users = {}, topics = {}, room = {}, lastKey = '', advancing = false;
+let me = null, users = {}, topics = {}, room = {}, lastKey = '', advancing = false, showTopics = false;
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -143,7 +143,12 @@ function addTopic() {
 }
 
 // ===== 描画 =====
-const actions = { pickUser: id => join(id), addUser, addTopic, leave, start, send, reveal, next };
+const actions = {
+  pickUser: id => join(id), addUser, addTopic, leave, start, send, reveal, next,
+  deleteTopic: id => db.ref('topics/' + id).remove(),
+  listTopics: () => { showTopics = true; render(); },
+  closeTopics: () => { showTopics = false; render(); }
+};
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-a]');
   if (el) actions[el.dataset.a]?.(el.dataset.v);
@@ -161,12 +166,14 @@ const header = () => `<div class="flex justify-between items-center mb-4">
 function render() {
   const app = $('#app');
   const phase = !me ? 'login' : (room.phase || 'lobby');
+  if (phase !== 'lobby') showTopics = false;
   const key = phase + ':' + (room.round || 0) + (phase==='answering' ? ':'+(room.members||[]).includes(me?.id) : '');
   if (phase === 'answering') {
     if (key !== lastKey) { app.innerHTML = answeringShell(); lastKey = key;
       const mine = room.answers?.[me.id]; if (mine) $('#ans').value = mine; }
     updateStatus(); return;
   }
+  if (phase === 'lobby' && showTopics) { lastKey = 'topics'; app.innerHTML = topicListView(); return; }
   lastKey = key;
   app.innerHTML = ({ login: loginView, lobby: lobbyView, result: resultView })[phase]();
 }
@@ -186,7 +193,22 @@ function lobbyView() {
     <div class="card mb-4"><div class="text-sm opacity-70 mb-1">参加中（${n}人）</div>${playersChips()}</div>
     <button data-a="start" class="btn btn-ok mb-3" ${n<2?'disabled style="opacity:.4"':''}>▶ スタート</button>
     ${n<2?'<p class="text-center text-sm opacity-70 mb-3">2人以上で開始できます</p>':''}
-    <button data-a="addTopic" class="btn btn-sub">＋ お題を追加（現在${Object.keys(topics).length}件）</button>`;
+    <button data-a="listTopics" class="btn btn-sub mb-3">📋 お題一覧を確認（${Object.keys(topics).length}件）</button>
+    <button data-a="addTopic" class="btn btn-sub">＋ お題を追加</button>`;
+}
+
+function topicListView() {
+  const list = Object.entries(topics);
+  const items = list.length
+    ? list.map(([id, t], i) => `<div class="flex items-center justify-between gap-3 py-3 border-b border-white/10 last:border-0">
+        <span class="min-w-0 break-words"><span class="opacity-60 mr-2">${i + 1}.</span>${esc(t)}</span>
+        <button data-a="deleteTopic" data-v="${esc(id)}" class="shrink-0 text-sm bg-red-500/80 rounded-xl px-3 py-2">削除</button></div>`).join('')
+    : '<p class="opacity-60 py-2">お題がありません</p>';
+  return `${header()}
+    <div class="text-lg font-bold mb-3">お題一覧（${list.length}件）</div>
+    <div class="card mb-4">${items}</div>
+    <button data-a="addTopic" class="btn btn-main mb-3">＋ お題を追加</button>
+    <button data-a="closeTopics" class="btn btn-sub">戻る</button>`;
 }
 
 function answeringShell() {
@@ -232,7 +254,7 @@ function resultView() {
     <div class="flex gap-3 mb-4">${box('👑 親（'+esc(uname(pid))+'）の回答', pAns, false)}
       ${isParent ? '' : box('あなたの回答', mine, ok(mine))}</div>
     <p class="text-center mb-3">一致した人：${hits}人</p>
-    <details class="card mb-4"><summary class="font-bold">みんなの回答を見る</summary><div class="mt-2">${others}</div></details>
+    <details open class="card mb-4"><summary class="font-bold">みんなの回答</summary><div class="mt-2">${others}</div></details>
     <button data-a="next" class="btn btn-ok">次のゲームへ</button>`;
 }
 
