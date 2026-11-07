@@ -22,6 +22,7 @@
   .btn{display:block;width:100%;border-radius:1rem;padding:1rem;font-size:1.125rem;font-weight:700;transition:transform .1s}
   .btn:active{transform:scale(.96)}
   .btn-main{background:#6366f1}.btn-sub{background:rgba(255,255,255,.12)}.btn-ok{background:#10b981}
+.btn-del{background:rgba(239,68,68,.85);border-radius:1rem;padding:1rem 1.1rem;font-size:1rem;font-weight:700;width:auto;flex-shrink:0}
   .card{background:rgba(255,255,255,.08);border-radius:1.25rem;padding:1.25rem}
 </style>
 </head>
@@ -48,6 +49,7 @@ const DEFAULT_TOPICS = ["好きな食べ物","夏といえば","無人島に1つ
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 let me = null, users = {}, topics = {}, room = {}, lastKey = '', advancing = false, showTopics = false;
+let usage = {}, lastTopicId = null;
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -59,6 +61,8 @@ const pick = a => a[Math.floor(Math.random()*a.length)];
 // ===== マスタ初期化・購読 =====
 db.ref('topics').transaction(c => c || Object.fromEntries(DEFAULT_TOPICS.map((t,i)=>['t'+i,t])));
 db.ref('topics').on('value', s => { topics = s.val() || {}; render(); });
+db.ref('topicUsage').on('value', s => { usage = s.val() || {}; });
+db.ref('meta/lastTopicId').on('value', s => { lastTopicId = s.val(); });
 db.ref('users').on('value', s => {
   users = s.val() || {};
   const saved = localStorage.getItem('meId');
@@ -90,17 +94,32 @@ function leave() {
 }
 
 // ===== ゲーム進行 =====
+// 出題回数が最少のお題から選び、直前のお題は除外する
+function chooseTopic() {
+  const entries = Object.entries(topics);
+  let cands = entries.filter(([id]) => id !== lastTopicId);
+  if (!cands.length) cands = entries; // お題が1件しかない場合のみ例外的に同じお題を許可
+  const count = id => usage[id] || 0;
+  const min = Math.min(...cands.map(([id]) => count(id)));
+  return pick(cands.filter(([id]) => count(id) === min)); // [id, 本文]
+}
 function start() {
-  const tl = Object.values(topics);
-  if (!tl.length) return alert('お題がありません');
+  if (!Object.keys(topics).length) return alert('お題がありません');
+  let picked = null;
   db.ref('room').transaction(c => {
     if (!c) return c;
     if (c.phase === 'answering' || c.phase === 'result') return; // 二重開始防止
     const ids = Object.keys(c.players || {});
     if (ids.length < 2) return;
-    c.phase = 'answering'; c.topic = pick(tl); c.parentId = pick(ids);
+    picked = chooseTopic();
+    c.phase = 'answering'; c.topic = picked[1]; c.parentId = pick(ids);
     c.members = ids; c.answers = null; c.round = (c.round || 0) + 1;
     return c;
+  }).then(res => {
+    if (!res.committed || !picked) return;
+    const tid = picked[0];
+    db.ref('topicUsage/' + tid).transaction(n => (n || 0) + 1);
+    db.ref('meta/lastTopicId').set(tid);
   });
 }
 function send() {
@@ -145,7 +164,10 @@ function addTopic() {
 // ===== 描画 =====
 const actions = {
   pickUser: id => join(id), addUser, addTopic, leave, start, send, reveal, next,
-  deleteTopic: id => db.ref('topics/' + id).remove(),
+  deleteTopic: id => db.ref().update({ ['topics/' + id]: null, ['topicUsage/' + id]: null })
+    .catch(e => { console.error('topic delete failed:', e); alert('削除できませんでした: ' + e.message); }),
+  deleteUser: id => db.ref().update({ ['users/' + id]: null, ['room/players/' + id]: null })
+    .catch(e => { console.error('user delete failed:', e); alert('削除できませんでした: ' + e.message); }),
   listTopics: () => { showTopics = true; render(); },
   closeTopics: () => { showTopics = false; render(); }
 };
@@ -180,7 +202,9 @@ function render() {
 
 function loginView() {
   const list = Object.entries(users).map(([id,u]) =>
-    `<button data-a="pickUser" data-v="${esc(id)}" class="btn btn-sub mb-3">${esc(u.name)}</button>`).join('');
+    `<div class="flex gap-2 mb-3">
+      <button data-a="pickUser" data-v="${esc(id)}" class="btn btn-sub">${esc(u.name)}</button>
+      <button data-a="deleteUser" data-v="${esc(id)}" class="btn-del">削除</button></div>`).join('');
   return `<h1 class="text-2xl font-bold text-center my-6">🎯 お題一致ゲーム</h1>
     <p class="text-center opacity-80 mb-4">あなたの名前を選んでください</p>
     ${list || '<p class="text-center opacity-60 mb-4">まだ名前がありません</p>'}
